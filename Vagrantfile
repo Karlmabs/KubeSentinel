@@ -108,4 +108,32 @@ Vagrant.configure("2") do |config|
     end
 
   end
+
+  # New monitoring node configuration
+  config.vm.define "monitoring" do |monitoring|
+    monitoring.vm.hostname = "monitoring"
+    monitoring.vm.network "private_network", ip: IP_NW + "#{IP_START + NUM_WORKER_NODES + 1}"
+    
+    if settings["shared_folders"]
+      settings["shared_folders"].each do |shared_folder|
+        monitoring.vm.synced_folder shared_folder["host_path"], shared_folder["vm_path"]
+      end
+    end
+    
+    monitoring.vm.provider "virtualbox" do |vb|
+      vb.cpus = 2  # Adjust as needed
+      vb.memory = 2048  # Adjust as needed
+      if settings["cluster_name"] and settings["cluster_name"] != ""
+        vb.customize ["modifyvm", :id, "--groups", ("/" + settings["cluster_name"])]
+      end
+    end
+
+    # Apply Grafana configuration
+    monitoring.vm.provision "ansible" do |ansible|
+      ansible.playbook = "playbooks/grafana.yml"
+      ansible.verbose = true
+    end
+
+  end
+
 end 
