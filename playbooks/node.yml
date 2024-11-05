@@ -1,0 +1,65 @@
+---
+- name: Setup Kubernetes Worker Node
+  hosts: all
+  become: true
+  vars:
+    config_path: "/vagrant/configs"
+
+  tasks:
+    - name: Check if join script exists
+      stat:
+        path: "{{ config_path }}/join.sh"
+      register: join_script
+
+    - name: Fail if join script doesn't exist
+      fail:
+        msg: "Join script not found at {{ config_path }}/join.sh"
+      when: not join_script.stat.exists
+
+    - name: Execute join script
+      command: /bin/bash {{ config_path }}/join.sh -v
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+      register: join_cluster
+
+    - name: Setup kubeconfig for vagrant user
+      block:
+        - name: Create .kube directory for vagrant user
+          file:
+            path: /home/vagrant/.kube
+            state: directory
+            owner: vagrant
+            group: vagrant
+            mode: '0755'
+
+        - name: Copy kubeconfig for vagrant user
+          copy:
+            src: "{{ config_path }}/config"
+            dest: /home/vagrant/.kube/config
+            remote_src: yes
+            owner: vagrant
+            group: vagrant
+            mode: '0600'
+
+    - name: Get node name
+      command: hostname -s
+      register: nodename
+      changed_when: false
+
+    - name: Label node as worker
+      command: kubectl label node {{ nodename.stdout }} node-role.kubernetes.io/worker=worker
+      become: yes
+      become_user: vagrant
+      environment:
+        KUBECONFIG: /home/vagrant/.kube/config
+      register: label_result
+      changed_when: "'not labeled' not in label_result.stderr"
+      failed_when:
+        - label_result.rc != 0
+        - "'already has a value' not in label_result.stderr"
+
+  handlers:
+    - name: Restart kubelet
+      service:
+        name: kubelet
+        state: restarted
