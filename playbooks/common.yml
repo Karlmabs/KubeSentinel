@@ -1,0 +1,165 @@
+---
+- name: Setup Kubernetes Node
+  hosts: all
+  become: true
+  vars:
+    dns_servers: "{{ dns_servers }}"
+    environment_vars: "{{ environment_vars }}"
+    kubernetes_version: "{{ kubernetes_version }}"
+    kubernetes_version_short: "{{ kubernetes_version_short }}"
+    os_version: "{{ os_version }}"
+
+  pre_tasks:
+    - name: Debug variables
+      debug:
+        msg: 
+          - "K8s Version: {{ kubernetes_version }}"
+          - "K8s Short Version: {{ kubernetes_version_short }}"
+          - "DNS Servers: {{ dns_servers }}"
+          - "Environment: {{ environment_vars }}"
+          - "OS Version: {{ os_version }}"
+
+  tasks:
+    - name: Create systemd resolved directory
+      file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure DNS servers
+      copy:
+        dest: /etc/systemd/resolved.conf.d/dns_servers.conf
+        content: |
+          [Resolve]
+          DNS={{ dns_servers }}
+
+    - name: Restart systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Disable swap
+      command: swapoff -a
+      changed_when: false
+
+    - name: Ensure swap remains disabled after reboot
+      ansible.builtin.shell: |
+        (crontab -l 2>/dev/null; echo "@reboot /sbin/swapoff -a") | crontab - || true
+      changed_when: false
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Configure kernel modules
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Load kernel modules
+      shell: |
+        modprobe overlay
+        modprobe br_netfilter
+      changed_when: false
+
+    - name: Configure sysctl parameters
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+
+    - name: Apply sysctl parameters
+      command: sysctl --system
+      changed_when: false
+
+    - name: Install prerequisites
+      apt:
+        name: 
+          - software-properties-common
+          - curl
+          - apt-transport-https
+          - ca-certificates
+        state: present
+
+    - name: Add CRI-O GPG key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/cri-o-apt-keyring.gpg
+
+    - name: Add CRI-O repository
+      copy:
+        dest: /etc/apt/sources.list.d/cri-o.list
+        content: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/ /"
+
+    - name: Install CRI-O
+      apt:
+        name: cri-o
+        state: present
+        update_cache: yes
+
+    - name: Start and enable CRI-O
+      systemd:
+        name: crio
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Ensure keyrings directory exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Kubernetes GPG key
+      shell: |
+        set -e
+        curl -fsSL "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_short }}/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      register: gpg_result
+      failed_when: 
+        - gpg_result.rc != 0 
+        - "'already exists' not in gpg_result.stderr | default('')"
+
+    - name: Add Kubernetes repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_short }}/deb/ /"
+
+    - name: Install Kubernetes packages
+      apt:
+        name:
+          - "kubelet={{ kubernetes_version }}"
+          - "kubectl={{ kubernetes_version }}"
+          - "kubeadm={{ kubernetes_version }}"
+          - jq
+        state: present
+        update_cache: yes
+
+    - name: Hold packages at current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubectl
+        - kubeadm
+        - cri-o
+
+    - name: Get local IP address
+      shell: |
+        ip --json a s | jq -r '.[] | if .ifname == "eth1" then .addr_info[] | if .family == "inet" then .local else empty end else empty end'
+      register: local_ip
+      changed_when: false
+
+    - name: Configure kubelet
+      copy:
+        dest: /etc/default/kubelet
+        content: |
+          KUBELET_EXTRA_ARGS=--node-ip={{ local_ip.stdout }}
+          {{ environment_vars }}

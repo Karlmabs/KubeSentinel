@@ -41,23 +41,27 @@ Vagrant.configure("2") do |config|
           vb.customize ["modifyvm", :id, "--groups", ("/" + settings["cluster_name"])]
         end
     end
-    controlplane.vm.provision "shell",
-      env: {
-        "DNS_SERVERS" => settings["network"]["dns_servers"].join(" "),
-        "ENVIRONMENT" => settings["environment"],
-        "KUBERNETES_VERSION" => settings["software"]["kubernetes"],
-        "KUBERNETES_VERSION_SHORT" => settings["software"]["kubernetes"][0..3],
-        "OS" => settings["software"]["os"]
-      },
-      path: "scripts/common.sh"
-    controlplane.vm.provision "shell",
-      env: {
-        "CALICO_VERSION" => settings["software"]["calico"],
-        "CONTROL_IP" => settings["network"]["control_ip"],
-        "POD_CIDR" => settings["network"]["pod_cidr"],
-        "SERVICE_CIDR" => settings["network"]["service_cidr"]
-      },
-      path: "scripts/master.sh"
+    controlplane.vm.provision "ansible" do |ansible|
+      ansible.playbook = "playbooks/common.yml"
+      ansible.verbose = true
+      ansible.extra_vars = {
+        dns_servers: settings["network"]["dns_servers"].join(" "),
+        environment_vars: settings["environment"],
+        kubernetes_version: settings["software"]["kubernetes"],
+        kubernetes_version_short: settings["software"]["kubernetes"][0..3],
+        os_version: settings["software"]["os"]
+      }
+    end
+    controlplane.vm.provision "ansible" do |ansible|
+      ansible.playbook = "playbooks/master.yml"
+      ansible.verbose = true
+      ansible.extra_vars = {
+        calico_version: settings["software"]["calico"],
+        control_ip: settings["network"]["control_ip"],
+        pod_cidr: settings["network"]["pod_cidr"],
+        service_cidr: settings["network"]["service_cidr"]
+      }
+    end
   end
 
   (1..NUM_WORKER_NODES).each do |i|
@@ -77,20 +81,29 @@ Vagrant.configure("2") do |config|
             vb.customize ["modifyvm", :id, "--groups", ("/" + settings["cluster_name"])]
           end
       end
-      node.vm.provision "shell",
-        env: {
-          "DNS_SERVERS" => settings["network"]["dns_servers"].join(" "),
-          "ENVIRONMENT" => settings["environment"],
-          "KUBERNETES_VERSION" => settings["software"]["kubernetes"],
-          "KUBERNETES_VERSION_SHORT" => settings["software"]["kubernetes"][0..3],
-          "OS" => settings["software"]["os"]
-        },
-        path: "scripts/common.sh"
-      node.vm.provision "shell", path: "scripts/node.sh"
+      node.vm.provision "ansible" do |ansible|
+        ansible.playbook = "playbooks/common.yml"
+        ansible.verbose = true
+        ansible.extra_vars = {
+          dns_servers: settings["network"]["dns_servers"].join(" "),
+          environment_vars: settings["environment"],
+          kubernetes_version: settings["software"]["kubernetes"],
+          kubernetes_version_short: settings["software"]["kubernetes"][0..3],
+          os_version: settings["software"]["os"]
+        }
+      end
+      node.vm.provision "ansible" do |ansible|
+        ansible.playbook = "playbooks/node.yml"
+      end
 
       # Only install the dashboard after provisioning the last worker (and when enabled).
       if i == NUM_WORKER_NODES and settings["software"]["dashboard"] and settings["software"]["dashboard"] != ""
-        node.vm.provision "shell", path: "scripts/dashboard.sh"
+        node.vm.provision "ansible" do |ansible|
+          ansible.playbook = "playbooks/dashboard.yml"
+          ansible.extra_vars = {
+            dashboard_version: settings["software"]["dashboard"]
+          }
+        end
       end
     end
 
