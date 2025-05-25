@@ -1,0 +1,124 @@
+---
+- name: Setup Kubernetes Control Plane
+  hosts: all
+  become: true
+  vars:
+    control_ip: "{{ control_ip }}"
+    pod_cidr: "{{ pod_cidr }}"
+    service_cidr: "{{ service_cidr }}"
+    calico_version: "{{ calico_version }}"
+    config_path: "/vagrant/configs"
+    kubernetes_config: "/etc/kubernetes/admin.conf"
+
+  tasks:
+    - name: Get node name
+      command: hostname -s
+      register: nodename
+      changed_when: false
+
+    - name: Pull kubeadm images
+      command: kubeadm config images pull
+      register: preflight_check
+      changed_when: false
+
+    - name: Initialize kubeadm
+      command: >
+        kubeadm init 
+        --apiserver-advertise-address={{ control_ip }}
+        --apiserver-cert-extra-sans={{ control_ip }}
+        --pod-network-cidr={{ pod_cidr }}
+        --service-cidr={{ service_cidr }}
+        --node-name={{ nodename.stdout }}
+        --ignore-preflight-errors=Swap
+      args:
+        creates: "{{ kubernetes_config }}"
+
+    - name: Create .kube directory
+      file:
+        path: "$HOME/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to user's kube config
+      copy:
+        src: "{{ kubernetes_config }}"
+        dest: "$HOME/.kube/config"
+        remote_src: yes
+        owner: "vagrant"
+        group: "vagrant"
+        mode: '0600'
+
+    - name: Remove old configs if they exist
+      file:
+        path: "{{ config_path }}"
+        state: absent
+      when: ansible_check_mode == false
+
+    - name: Create config directory
+      file:
+        path: "{{ config_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to shared config
+      copy:
+        src: "{{ kubernetes_config }}"
+        dest: "{{ config_path }}/config"
+        remote_src: yes
+        mode: '0644'
+
+    - name: Create join command file
+      file:
+        path: "{{ config_path }}/join.sh"
+        state: touch
+        mode: '0755'
+
+    - name: Generate join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+
+    - name: Save join command
+      copy:
+        content: "{{ join_command.stdout }}\n"
+        dest: "{{ config_path }}/join.sh"
+        mode: '0755'
+
+    - name: Download Calico manifest
+      get_url:
+        url: "https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/calico.yaml"
+        dest: "{{ config_path }}/calico.yaml"
+        mode: '0644'
+
+    - name: Install Calico network plugin
+      shell: kubectl apply -f {{ config_path }}/calico.yaml
+      changed_when: false
+
+    - name: Setup vagrant user kubeconfig
+      block:
+        - name: Create .kube directory for vagrant user
+          file:
+            path: /home/vagrant/.kube
+            state: directory
+            owner: vagrant
+            group: vagrant
+            mode: '0755'
+
+        - name: Copy kubeconfig for vagrant user
+          copy:
+            src: "{{ config_path }}/config"
+            dest: /home/vagrant/.kube/config
+            owner: vagrant
+            group: vagrant
+            mode: '0600'
+            remote_src: yes
+
+    - name: Install Metrics Server
+      shell: kubectl apply -f https://raw.githubusercontent.com/techiescamp/kubeadm-scripts/main/manifests/metrics-server.yaml
+      changed_when: false
+
+  handlers:
+    - name: Restart kubelet
+      service:
+        name: kubelet
+        state: restarted

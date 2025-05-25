@@ -1,0 +1,136 @@
+---
+- name: Deploy Kubernetes Dashboard
+  hosts: all
+  become: true
+  vars:
+    config_path: "/vagrant/configs"
+    dashboard_version: "{{ dashboard_version }}"
+
+  tasks:
+    - name: Check if dashboard should be deployed
+      debug:
+        msg: "Dashboard version: {{ dashboard_version }}"
+      when: dashboard_version | length > 0
+
+    - name: Deploy dashboard
+      block:
+        - name: Wait for metrics server to be ready
+          shell: |
+            kubectl get pods -A -l k8s-app=metrics-server | grep Running
+          register: metrics_status
+          until: metrics_status.rc == 0
+          retries: 30
+          delay: 10
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+          ignore_errors: yes
+
+        - name: Create kubernetes-dashboard namespace
+          command: kubectl create namespace kubernetes-dashboard
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+          register: create_ns
+          failed_when: 
+            - create_ns.rc != 0 
+            - "'already exists' not in create_ns.stderr"
+          changed_when: create_ns.rc == 0
+
+        - name: Create ServiceAccount manifest
+          copy:
+            dest: "{{ config_path }}/dashboard-sa.yaml"
+            content: |
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: admin-user
+                namespace: kubernetes-dashboard
+
+        - name: Create Secret manifest
+          copy:
+            dest: "{{ config_path }}/dashboard-secret.yaml"
+            content: |
+              apiVersion: v1
+              kind: Secret
+              type: kubernetes.io/service-account-token
+              metadata:
+                name: admin-user
+                namespace: kubernetes-dashboard
+                annotations:
+                  kubernetes.io/service-account.name: admin-user
+
+        - name: Create ClusterRoleBinding manifest
+          copy:
+            dest: "{{ config_path }}/dashboard-crb.yaml"
+            content: |
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: admin-user
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: cluster-admin
+              subjects:
+              - kind: ServiceAccount
+                name: admin-user
+                namespace: kubernetes-dashboard
+
+        - name: Apply ServiceAccount
+          command: kubectl apply -f {{ config_path }}/dashboard-sa.yaml
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+
+        - name: Apply Secret
+          command: kubectl apply -f {{ config_path }}/dashboard-secret.yaml
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+
+        - name: Apply ClusterRoleBinding
+          command: kubectl apply -f {{ config_path }}/dashboard-crb.yaml
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+
+        - name: Deploy dashboard
+          command: kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v{{ dashboard_version }}/aio/deploy/recommended.yaml
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+
+        - name: Wait for token creation
+          command: kubectl get secret admin-user -n kubernetes-dashboard
+          register: token_check
+          until: token_check.rc == 0
+          retries: 12
+          delay: 5
+          become_user: vagrant
+          environment:
+            KUBECONFIG: /home/vagrant/.kube/config
+
+    - name: Get admin user token
+      shell: |
+        kubectl -n kubernetes-dashboard get secret/admin-user -o jsonpath='{.data.token}' | base64 -d
+      register: token_output
+      become_user: vagrant
+      environment:
+        KUBECONFIG: /home/vagrant/.kube/config
+
+    - name: Save token to file
+      copy:
+        content: "{{ token_output.stdout }}"
+        dest: "{{ config_path }}/token"
+        mode: '0600'
+
+    - name: Display token and access information
+      debug:
+        msg:
+          - "Token has been saved to: configs/token"
+          - "{{ token_output.stdout }}"
+          - "Use it to log in at:"
+          - "http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/#/overview?namespace=kubernetes-dashboard"
+
+      when: dashboard_version | length > 0
